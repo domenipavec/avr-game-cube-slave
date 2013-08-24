@@ -38,10 +38,13 @@
 #include "shiftOut.h"
 #include "io.h"
 
-uint8_t flags = 0;
+volatile uint8_t flags = 0;
 #define MS_FLAG 0
 #define VOLTAGE_WARNING 1
 #define VOLTAGE_CUTOFF 2
+#define IR_CONNECTED 3
+
+volatile uint8_t ir_count = 0;
 
 #define DISPLAY_DOT_0 0
 #define DISPLAY_DOT_1 1
@@ -53,7 +56,7 @@ uint8_t flags = 0;
 #define DISPLAY_ZERO_3 7
 
 // global buffers
-uint8_t parts[4];
+volatile uint8_t parts[4];
 
 void displayWrite(uint8_t part0, uint8_t part1, uint8_t flags) {
 	*((uint32_t *)&parts) = 0;
@@ -233,6 +236,7 @@ int main() {
 	TCCR0B = 0b00000001;
 	OCR0A = 105;
 	OCR0B = 105;
+	TIMSK0 = 0b00000010; // interrupt for ir count
 
 	// adc measurement
 	ADMUX = 0b11000111;
@@ -253,22 +257,116 @@ int main() {
 	uint8_t pwm_state = 0;
 	uint16_t adc_state = 0;
 	uint16_t led_state = 0;
+	uint8_t ir_state = 0;
 
 	for (;;) {
+
+		// ir state machine
+		switch (ir_state) {
+			case 0: // not connected, wait
+				CLEARBIT(flags, IR_CONNECTED);
+				if (BITCLEAR(PIND, PD7)) {
+					ir_state = 1;
+				}
+				break;
+			case 1: // wait till end of signal
+				if (BITSET(PIND, PD7)) {
+					ir_state = 2;
+					ir_count = 0;
+				}
+				break;
+			case 2: // wait for required time and transmit
+				if (ir_count >= 24) {
+					ir_state = 3;
+					SETBIT(DDRD, PD5);
+					ir_count = 0;
+				}
+				break;
+			case 3: // stop led
+				if (ir_count >= 20) {
+					CLEARBIT(DDRD, PD5);
+					ir_state = 4;
+				}
+				break;
+			case 4: // wait till after possible beginning (just)
+				if (ir_count >= 64) {
+					ir_state = 5;
+				}
+				break;
+			case 5: // check for signal and timeout
+				if (BITCLEAR(PINB, PB6)) {
+					ir_state = 6;
+				}
+				if (ir_count >= 130) {
+					ir_state = 0;
+				}
+				break;
+			case 6: // wait till end of signal
+				if (BITSET(PINB, PB6)) {
+					ir_state = 7;
+					ir_count = 0;
+				}
+				break;
+			case 7: // wait required time, transmit
+				ledOut.clear();
+				if (ir_count >= 24) {
+					ir_state = 8;
+					SETBIT(DDRD, PD6);
+					ir_count = 0;
+				}
+				break;
+			case 8:
+				if (ir_count >= 20) { // stop led
+					CLEARBIT(DDRD, PD6);
+					ir_state = 9;
+					ir_count = 0;
+				}
+				break;
+			case 9: // wait till after possible beginning (just)
+				if (ir_count >= 64) {
+					ir_state = 10;
+				}
+				break;
+			case 10: // check for signal and timeout
+				if (BITCLEAR(PINB, PB7)) {
+					ir_state = 11;
+				}
+				if (ir_count >= 130) {
+					ir_state = 0;
+				}
+				break;
+			case 11: // wait till end of signal
+				if (BITSET(PINB, PB7)) {
+					ir_state = 12;
+					ir_count = 0;
+				}
+				break;
+			case 12: // wait till after possible beginning (just)
+				if (ir_count >= 18) {
+					ir_state = 13;
+				}
+				break;
+			case 13: // check for signal and timeout
+				if (BITCLEAR(PIND, PD7)) {
+					ir_state = 1;
+					SETBIT(flags, IR_CONNECTED);
+								ledOut.set();
+
+				}
+				if (ir_count >= 85) {
+					ir_state = 0;
+				}
+				break;
+		}
+
 		if (BITSET(flags, MS_FLAG)) {
 			CLEARBIT(flags, MS_FLAG);
 			
 			// test of ir
 			uint8_t a = 0;
 			uint8_t b = 0;
-			if (BITSET(PIND, PD7)) {
+			if (BITSET(flags, IR_CONNECTED)) {
 				a += 1;
-			}
-			if (BITSET(PINB, PB6)) {
-				a += 10;
-			}
-			if (BITSET(PINB, PB7)) {
-				b += 1;
 			}
 			displayWrite(b, a, 0);
 			
@@ -295,7 +393,7 @@ int main() {
 					displayLatch.set();
 					displayLatch.clear();
 					
-					if (BITSET(flags, VOLTAGE_WARNING)) {
+					/*if (BITSET(flags, VOLTAGE_WARNING)) {
 						led_state++;
 						if (led_state > 300) {
 							ledOut.set();
@@ -305,7 +403,7 @@ int main() {
 						}
 					} else {
 						ledOut.set();
-					}
+					}*/
 				} else if (pwm_state == 1) {
 					avr_cpp_lib::shiftOut(&displayData, &displayClock, 0);
 					avr_cpp_lib::shiftOut(&displayData, &displayClock, 0);
@@ -314,7 +412,7 @@ int main() {
 					displayLatch.set();
 					displayLatch.clear();
 					
-					ledOut.clear();
+					/*ledOut.clear();*/
 				}
 				pwm_state++;
 			} else {
@@ -352,6 +450,10 @@ int main() {
 
 ISR(TIMER1_COMPA_vect) {
 	SETBIT(flags, MS_FLAG);
+}
+
+ISR(TIMER0_COMPA_vect) {
+	ir_count++;
 }
 
 ISR(ADC_vect) {
