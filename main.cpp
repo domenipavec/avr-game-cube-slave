@@ -255,6 +255,7 @@ int main() {
 
 	uint16_t button_state = 0;
 	uint8_t pwm_state = 0;
+	uint8_t pwm_bit = 0;
 	uint16_t adc_state = 0;
 	uint16_t led_state = 0;
 	uint8_t ir_state = 0;
@@ -359,6 +360,45 @@ int main() {
 				break;
 		}
 
+			
+		// pwm of leds
+		if (pwm_state < 4) {
+			if (pwm_bit == 16) {
+				pwm_state++;
+				pwm_bit = 0;	
+				displayData.clear();
+				displayLatch.set();
+				displayLatch.clear();
+				/*ledOut.clear();*/
+			}
+			
+			if (pwm_state == 0) {
+				if (BITSET(parts[pwm_bit/8], pwm_bit%8)) {
+					displayData.set();
+				} else {
+					displayData.clear();
+				}
+				displayClock.set();
+				displayClock.clear();
+			} else if (pwm_state == 1) {
+				displayClock.set();
+				displayClock.clear();
+			}
+			pwm_bit++;
+		} else {
+			/*if (BITSET(flags, VOLTAGE_WARNING)) {
+			  if (led_state > 300) {
+			  ledOut.set();
+			  if (led_state > 400) {
+			  led_state = 0;
+			  }
+			  }
+			  } else {
+			  ledOut.set();
+			  }*/
+			pwm_state = 0;
+		}
+		
 		if (BITSET(flags, MS_FLAG)) {
 			CLEARBIT(flags, MS_FLAG);
 			
@@ -369,6 +409,9 @@ int main() {
 				a += 1;
 			}
 			displayWrite(b, a, 0);
+
+			// led blinking
+			led_state++;
 			
 			// adc
 			if (adc_state == 2000) {
@@ -381,42 +424,6 @@ int main() {
 			// voltage cutoff
 			if (BITSET(flags, VOLTAGE_CUTOFF)) {
 				break;
-			}
-			
-			// pwm of leds
-			if (pwm_state < 3) {
-				if (pwm_state == 0) {
-					avr_cpp_lib::shiftOut(&displayData, &displayClock, parts[0]);
-					avr_cpp_lib::shiftOut(&displayData, &displayClock, parts[1]);
-					avr_cpp_lib::shiftOut(&displayData, &displayClock, parts[2]);
-					avr_cpp_lib::shiftOut(&displayData, &displayClock, parts[3]);
-					displayLatch.set();
-					displayLatch.clear();
-					
-					/*if (BITSET(flags, VOLTAGE_WARNING)) {
-						led_state++;
-						if (led_state > 300) {
-							ledOut.set();
-							if (led_state > 400) {
-								led_state = 0;
-							}
-						}
-					} else {
-						ledOut.set();
-					}*/
-				} else if (pwm_state == 1) {
-					avr_cpp_lib::shiftOut(&displayData, &displayClock, 0);
-					avr_cpp_lib::shiftOut(&displayData, &displayClock, 0);
-					avr_cpp_lib::shiftOut(&displayData, &displayClock, 0);
-					avr_cpp_lib::shiftOut(&displayData, &displayClock, 0);
-					displayLatch.set();
-					displayLatch.clear();
-					
-					/*ledOut.clear();*/
-				}
-				pwm_state++;
-			} else {
-				pwm_state = 0;
 			}
 			
 			// button
