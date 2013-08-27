@@ -24,7 +24,7 @@
  * SOFTWARE.
  */
  
- #define F_CPU 8000000UL  // 8 MHz
+#define F_CPU 8000000UL  // 8 MHz
 //#include <util/delay.h>
 
 #include <avr/io.h>
@@ -38,11 +38,17 @@
 #include "shiftOut.h"
 #include "io.h"
 
+#define NUM_MODES 3
+
 volatile uint8_t flags = 0;
 #define MS_FLAG 0
 #define VOLTAGE_WARNING 1
 #define VOLTAGE_CUTOFF 2
 #define IR_CONNECTED 3
+#define MODE_SELECTED 4
+#define IR_WAS_CONNECTED 5
+#define MODE_ACTIVE 6
+#define COUNT_ORDER 7
 
 volatile uint8_t ir_count = 0;
 
@@ -222,6 +228,7 @@ int main() {
 	SETBIT(DDRC, PC0);
 	SETBIT(PORTC, PC0);
 	SETBIT(PORTC, PC1);
+	while (BITCLEAR(PINC, PC1));
 	
 	// timer 1 for 1 ms interrupts
 	TCCR1A = 0;
@@ -237,6 +244,13 @@ int main() {
 	OCR0A = 105;
 	OCR0B = 105;
 	TIMSK0 = 0b00000010; // interrupt for ir count
+
+	// speaker
+	SETBIT(DDRD, PD1);
+	//TCCR2A = 0b00000010;
+	//TCCR2B = 0b00000111; // 1024 prescaler
+	//OCR2A = 1; // for around 440hz
+	//TIMSK2 = 0b00000010;
 
 	// adc measurement
 	ADMUX = 0b11000111;
@@ -259,6 +273,14 @@ int main() {
 	uint16_t adc_state = 0;
 	uint16_t led_state = 0;
 	uint8_t ir_state = 0;
+	uint8_t speaker_state = 0;
+	
+	uint8_t mode_state = 0;
+	uint8_t disp0 = 0;
+	uint8_t disp1 = 0;
+	uint16_t delay_state = 0;
+
+	SETBIT(flags, IR_WAS_CONNECTED);
 
 	for (;;) {
 
@@ -270,20 +292,20 @@ int main() {
 					ir_state = 1;
 				}
 				break;
-			case 1: // wait till end of signal
+			case 1: // wait till end of signal 0
 				if (BITSET(PIND, PD7)) {
 					ir_state = 2;
 					ir_count = 0;
 				}
 				break;
-			case 2: // wait for required time and transmit
+			case 2: // wait for required time and transmit 0
 				if (ir_count >= 24) {
 					ir_state = 3;
 					SETBIT(DDRD, PD5);
 					ir_count = 0;
 				}
 				break;
-			case 3: // stop led
+			case 3: // stop led 0
 				if (ir_count >= 20) {
 					CLEARBIT(DDRD, PD5);
 					ir_state = 4;
@@ -294,7 +316,7 @@ int main() {
 					ir_state = 5;
 				}
 				break;
-			case 5: // check for signal and timeout
+			case 5: // check for signal 1 and timeout
 				if (BITCLEAR(PINB, PB6)) {
 					ir_state = 6;
 				}
@@ -302,14 +324,13 @@ int main() {
 					ir_state = 0;
 				}
 				break;
-			case 6: // wait till end of signal
+			case 6: // wait till end of signal 1
 				if (BITSET(PINB, PB6)) {
 					ir_state = 7;
 					ir_count = 0;
 				}
 				break;
-			case 7: // wait required time, transmit
-				ledOut.clear();
+			case 7: // wait required time, transmit 1
 				if (ir_count >= 24) {
 					ir_state = 8;
 					SETBIT(DDRD, PD6);
@@ -317,7 +338,7 @@ int main() {
 				}
 				break;
 			case 8:
-				if (ir_count >= 20) { // stop led
+				if (ir_count >= 20) { // stop led 1
 					CLEARBIT(DDRD, PD6);
 					ir_state = 9;
 					ir_count = 0;
@@ -328,7 +349,7 @@ int main() {
 					ir_state = 10;
 				}
 				break;
-			case 10: // check for signal and timeout
+			case 10: // check for signal 2 and timeout
 				if (BITCLEAR(PINB, PB7)) {
 					ir_state = 11;
 				}
@@ -336,7 +357,7 @@ int main() {
 					ir_state = 0;
 				}
 				break;
-			case 11: // wait till end of signal
+			case 11: // wait till end of signal 2
 				if (BITSET(PINB, PB7)) {
 					ir_state = 12;
 					ir_count = 0;
@@ -347,7 +368,7 @@ int main() {
 					ir_state = 13;
 				}
 				break;
-			case 13: // check for signal and timeout
+			case 13: // check for signal 0 and timeout
 				if (BITCLEAR(PIND, PD7)) {
 					ir_state = 1;
 					SETBIT(flags, IR_CONNECTED);
@@ -363,13 +384,13 @@ int main() {
 			
 		// pwm of leds
 		if (pwm_state < 4) {
-			if (pwm_bit == 16) {
+			if (pwm_bit == 32) {
 				pwm_state++;
-				pwm_bit = 0;	
+				pwm_bit = 0;
 				displayData.clear();
 				displayLatch.set();
 				displayLatch.clear();
-				/*ledOut.clear();*/
+				ledOut.clear();
 			}
 			
 			if (pwm_state == 0) {
@@ -386,30 +407,89 @@ int main() {
 			}
 			pwm_bit++;
 		} else {
-			/*if (BITSET(flags, VOLTAGE_WARNING)) {
-			  if (led_state > 300) {
-			  ledOut.set();
-			  if (led_state > 400) {
-			  led_state = 0;
-			  }
-			  }
-			  } else {
-			  ledOut.set();
-			  }*/
+			if (BITSET(flags, VOLTAGE_WARNING)) {
+				if (led_state > 700) {
+					ledOut.set();
+					if (led_state > 800) {
+						led_state = 0;
+					}
+				}
+			} else {
+				ledOut.set();
+			}
+			pwm_bit = 0;
 			pwm_state = 0;
 		}
 		
 		if (BITSET(flags, MS_FLAG)) {
 			CLEARBIT(flags, MS_FLAG);
 			
-			// test of ir
-			uint8_t a = 0;
-			uint8_t b = 0;
-			if (BITSET(flags, IR_CONNECTED)) {
-				a += 1;
+			if (BITCLEAR(flags, IR_CONNECTED)) {
+				if (BITCLEAR(flags, IR_WAS_CONNECTED) && delay_state == 0) {
+					SETBIT(flags, IR_WAS_CONNECTED);
+					
+					speaker_state = 150;
+					delay_state = 2000;
+					
+					// actions
+					if (BITSET(flags, MODE_SELECTED)) {
+						if (mode_state == 1) {
+							if (BITCLEAR(flags, MODE_ACTIVE)) {
+								SETBIT(flags, MODE_ACTIVE);
+								disp0 = 0;
+								disp1 = 0;
+								CLEARBIT(flags, COUNT_ORDER);
+							} else {
+								CLEARBIT(flags, MODE_ACTIVE);
+							}
+						} else if (mode_state == 2) {
+							disp1++;
+							displayWrite(disp0, disp1, 0b10000000);
+						}
+					}
+				}
+			} else {
+				CLEARBIT(flags, IR_WAS_CONNECTED);
 			}
-			displayWrite(b, a, 0);
-
+			
+			// timing
+			if (BITSET(flags, MODE_ACTIVE)) {
+				if (BITCLEAR(flags, COUNT_ORDER)) {
+					if (adc_state % 10 == 1) {
+						disp1++;
+						if (disp1 == 100) {
+							disp0++;
+							disp1 = 0;
+							if (disp0 == 60) {
+								disp0 = 1;
+								SETBIT(flags, COUNT_ORDER);
+							}
+						}
+						displayWrite(disp0, disp1, 0b11100010);
+					}
+				} else {
+					if (adc_state % 1000 == 1) {
+						disp1++;
+						if (disp1 == 60) {
+							disp0++;
+							disp1 = 0;
+						}
+					}
+					displayWrite(disp0, disp1, 0b11100010);
+				}
+			}
+			if (delay_state > 0) {
+				delay_state --;
+			}
+			
+			// speaker
+			if (speaker_state > 0) {
+				speaker_state--;
+				TOGGLEBIT(PORTD, PD1);
+			} else {
+				CLEARBIT(PORTD, PD1);
+			}
+			
 			// led blinking
 			led_state++;
 			
@@ -419,6 +499,17 @@ int main() {
 				SETBIT(ADCSRA, ADSC);
 			} else {
 				adc_state++;
+			}
+			
+			// mode change
+			if (BITCLEAR(flags, MODE_SELECTED)) {
+				if (adc_state % 1000 == 1) {
+					mode_state++;
+					if (mode_state > NUM_MODES) {
+						mode_state = 1;
+					}
+					displayWrite(0, mode_state, 0);
+				}
 			}
 			
 			// voltage cutoff
@@ -433,6 +524,17 @@ int main() {
 				// shutdown if pressed for 1s				
 				if (button_state >= 1000) {
 					break;
+				}
+				
+				if (BITCLEAR(flags, MODE_SELECTED)) {
+					SETBIT(flags, MODE_SELECTED);
+					if (mode_state == 1) {
+						displayWrite(0,0,0b11100010);
+					} else if (mode_state == 2) {
+						displayWrite(0,0,0b10000000);
+					} else if (mode_state == 3) {
+						displayWrite(0,0,0b00001000);
+					}
 				}
 
 				// button pressed
