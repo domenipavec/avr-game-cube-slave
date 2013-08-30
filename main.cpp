@@ -25,11 +25,16 @@
  */
  
 #define F_CPU 8000000UL  // 8 MHz
-//#include <util/delay.h>
+#include <util/delay.h>
+
+// times are multiplied by 50ms
+#define ADC_TIMEOUT 200
+#define ADC_STARTUP 10
+#define ADC_CALIBRATION 1
 
 #include <avr/io.h>
 #include <avr/interrupt.h>
-//#include <avr/pgmspace.h>
+#include <avr/pgmspace.h>
 //#include <avr/eeprom.h> 
 
 #include <stdint.h>
@@ -40,187 +45,317 @@
 
 #define NUM_MODES 3
 
-volatile uint8_t flags = 0;
-#define MS_FLAG 0
-#define VOLTAGE_WARNING 1
-#define VOLTAGE_CUTOFF 2
-#define IR_CONNECTED 3
-#define MODE_SELECTED 4
-#define IR_WAS_CONNECTED 5
-#define MODE_ACTIVE 6
-#define COUNT_ORDER 7
+// global states and flags
+volatile uint8_t adc_flags = 0;
+#define VOLTAGE_WARNING 0
+#define VOLTAGE_CUTOFF 1
 
+uint8_t button_state = 0;
+uint8_t speaker_timeout = 0;
+
+// function prototypes
+void shutdown();
+
+// display output pins
+avr_cpp_lib::OutputPin displayData(&DDRD, &PORTD, PD2);
+avr_cpp_lib::OutputPin displayClock(&DDRD, &PORTD, PD3);
+avr_cpp_lib::OutputPin displayLatch(&DDRD, &PORTD, PD4);	
+
+// led output pin
+avr_cpp_lib::OutputPin ledOut(&DDRC, &PORTC, PC2);
+
+// timer counts
 volatile uint8_t ir_count = 0;
+volatile uint8_t ms_count = 0;
+volatile uint16_t general_count = 0;
+volatile uint16_t ms50_count = 0;
 
-#define DISPLAY_DOT_0 0
-#define DISPLAY_DOT_1 1
-#define DISPLAY_DOT_2 2
-#define DISPLAY_DOT_3 3
-#define DISPLAY_ZERO_0 4
-#define DISPLAY_ZERO_1 5
-#define DISPLAY_ZERO_2 6
-#define DISPLAY_ZERO_3 7
+// DISPLAY DATA
+volatile uint8_t digits[4] = {0,0,0,0};
+volatile uint32_t segments = 0;
 
-// global buffers
-volatile uint8_t parts[4];
+// digit zero is right most
+const uint32_t digit0masks[] PROGMEM = {
+	0b01011111000, // 0
+	0b00001100000, // 1
+	0b10011011000, // 2
+	0b10011110000, // 3
+	0b11001100000, // 4
+	0b11010110000, // 5
+	0b11010111000, // 6
+	0b00011100000, // 7
+	0b11011111000, // 8
+	0b11011110000, // 9
+};
+const uint32_t digit1masks[] PROGMEM = {
+	0b0101100000000111, // 0
+	0b0000100000000100, // 1
+	0b1001100000000011, // 2
+	0b1001100000000110, // 3
+	0b1001100000000100, // 4
+	0b1101000000000110, // 5
+	0b1101000000000111, // 6
+	0b0001100000000100, // 7
+	0b1101100000000111, // 8
+	0b1101100000000110, // 9
+};
+const uint32_t digit2masks[] PROGMEM = {
+	0b11100000000010110000000000000000, // 0
+	0b10000000000000010000000000000000, // 1
+	0b01100000000100110000000000000000, // 2
+	0b11000000000100110000000000000000, // 3
+	0b10000000000110010000000000000000, // 4
+	0b11000000000110100000000000000000, // 5
+	0b11100000000110100000000000000000, // 6
+	0b10000000000000110000000000000000, // 7
+	0b11100000000110110000000000000000, // 8
+	0b11000000000110110000000000000000, // 9
+};
+const uint32_t digit3masks[] PROGMEM = {
+	0b11101011000000000000000000000, // 0
+	0b10000001000000000000000000000, // 1
+	0b01110011000000000000000000000, // 2
+	0b11010011000000000000000000000, // 3
+	0b10011001000000000000000000000, // 4
+	0b11011010000000000000000000000, // 5
+	0b11111010000000000000000000000, // 6
+	0b10000011000000000000000000000, // 7
+	0b11111011000000000000000000000, // 8
+	0b11011011000000000000000000000, // 9
+};
 
-void displayWrite(uint8_t part0, uint8_t part1, uint8_t flags) {
-	*((uint32_t *)&parts) = 0;
-	switch (part1 % 10) {
-		case 0:
-			if (BITSET(flags, DISPLAY_ZERO_3)) {
-				SETBITS(parts[0], BIT(3) | BIT(4) | BIT(5) | BIT(6) | BIT(7));
-				SETBIT(parts[1], 1);
-			}
-			break;
-		case 2:
-			SETBITS(parts[0], BIT(3) | BIT(4) | BIT(6) | BIT(7));
-			SETBIT(parts[1], 2);
-			break;
-		case 4:
-			SETBITS(parts[0], BIT(5) | BIT(6));
-			SETBITS(parts[1], BIT(1) | BIT(2));
-			break;
-		case 6:
-			SETBIT(parts[0], 3);
-		case 5:
-			SETBITS(parts[0], BIT(4) | BIT(5) | BIT(7));
-			SETBITS(parts[1], BIT(1) | BIT(2));
-			break;
-		case 8:
-			SETBIT(parts[0], 3);
-		case 9:
-			SETBIT(parts[1], 1);
-		case 3:
-			SETBIT(parts[1], 2);
-			SETBIT(parts[0], 4);
-		case 7:
-			SETBIT(parts[0], 7);
-		case 1:
-			SETBITS(parts[0], BIT(5) | BIT(6));
-			break;
-	}
-	
-	switch ((part1 / 10) % 10) {
-		case 0:
-			if (BITSET(flags, DISPLAY_ZERO_2)) {
-				SETBITS(parts[0], BIT(0) | BIT(1) | BIT(2));
-				SETBITS(parts[1], BIT(3) | BIT(4) | BIT(6));
-			}
-			break;
-		case 2:
-			SETBITS(parts[0], BIT(0) | BIT(1));
-			SETBITS(parts[1], BIT(3) | BIT(4) | BIT(7));
-			break;
-		case 4:
-			SETBIT(parts[0], 2);
-			SETBITS(parts[1], BIT(3) | BIT(6) | BIT(7));
-			break;
-		case 6:
-			SETBIT(parts[0], 0);
-		case 5:
-			SETBITS(parts[0], BIT(1) | BIT(2));
-			SETBITS(parts[1], BIT(4) | BIT(6) | BIT(7));
-			break;
-		case 8:
-			SETBIT(parts[0], 0);
-		case 9:
-			SETBIT(parts[1], 6);
-		case 3:
-			SETBIT(parts[1], 7);
-			SETBIT(parts[0], 1);
-		case 7:
-			SETBIT(parts[1], 4);
-		case 1:
-			SETBIT(parts[1], 3);
-			SETBIT(parts[0], 2);
-			break;
-	}
+volatile uint8_t display_zeros = 0;
+#define DISPLAY_ZERO_0 0
+#define DISPLAY_ZERO_1 1
+#define DISPLAY_ZERO_2 2
+#define DISPLAY_ZERO_3 3
 
-	switch (part0 % 10) {
-		case 0:
-			if (BITSET(flags, DISPLAY_ZERO_1)) {
-				SETBITS(parts[2], BIT(0) | BIT(1) | BIT(3));
-				SETBITS(parts[3], BIT(5) | BIT(6) | BIT(7));
+volatile uint32_t display_dots = 0;
+#define DISPLAY_DOT_0 8
+#define DISPLAY_DOT_1 13
+#define DISPLAY_DOT_2 18
+#define DISPLAY_DOT_3 23
+
+volatile uint8_t display_update = 0;
+volatile uint8_t display_bit = 0;
+
+
+// DISPLAY ROUTINE
+// i moved the actual update of segments to general loop,
+// to avoid recalculation when not necessary
+inline void displayUpdate() {
+	display_update = 1;
+}
+
+inline void increaseWithMax(uint8_t ol0 = 10, uint8_t ol1 = 10, uint8_t ol2 = 10, uint8_t ol3 = 10) {
+	digits[0]++;
+	if (digits[0] >= ol0) {
+		digits[0] = 0;
+		digits[1]++;
+		if (digits[1] >= ol1) {
+			digits[1] = 0;
+			digits[2]++;
+			if (digits[2] >= ol2) {
+				digits[2] = 0;
+				digits[3]++;
+				if (digits[3] >= ol3) {
+					digits[3] = 0;
+				}
 			}
-			break;
-		case 2:
-			SETBITS(parts[2], BIT(1) | BIT(0) | BIT(4));
-			SETBITS(parts[3], BIT(5) | BIT(6));
-			break;
-		case 4:
-			SETBITS(parts[2], BIT(0) | BIT(3) | BIT(4));
-			SETBIT(parts[3], 7);
-			break;
-		case 6:
-			SETBIT(parts[3], 5);
-		case 5:
-			SETBITS(parts[2], BIT(1) | BIT(3) | BIT(4));
-			SETBITS(parts[3], BIT(6) | BIT(7));
-			break;
-		case 8:
-			SETBIT(parts[3], 5);
-		case 9:
-			SETBIT(parts[2], 3);
-		case 3:
-			SETBIT(parts[2], 4);
-			SETBIT(parts[3], 6);
-		case 7:
-			SETBIT(parts[2], 1);
-		case 1:
-			SETBIT(parts[2], 0);
-			SETBIT(parts[3], 7);
-			break;
-	}
-	
-	switch ((part0 / 10) % 10) {
-		case 0:
-			if (BITSET(flags, DISPLAY_ZERO_0)) {
-				SETBITS(parts[2], BIT(5) | BIT(6));
-				SETBITS(parts[3], BIT(0) | BIT(2) | BIT(3) | BIT(4));
-			}
-			break;
-		case 2:
-			SETBITS(parts[2], BIT(5) | BIT(6));
-			SETBITS(parts[3], BIT(1) | BIT(2) | BIT(3));
-			break;
-		case 4:
-			SETBIT(parts[2], 5);
-			SETBITS(parts[3], BIT(0) | BIT(1) | BIT(4));
-			break;
-		case 6:
-			SETBIT(parts[3], 2);
-		case 5:
-			SETBIT(parts[2], 6);
-			SETBITS(parts[3], BIT(0) | BIT(1) | BIT(3) | BIT(4));
-			break;
-		case 8:
-			SETBIT(parts[3], 2);
-		case 9:
-			SETBIT(parts[3], 0);
-		case 3:
-			SETBITS(parts[3], BIT(1) | BIT(3));
-		case 7:
-			SETBIT(parts[2], 6);
-		case 1:
-			SETBIT(parts[2], 5);
-			SETBIT(parts[3], 4);
-			break;
-	}
-	
-	if (BITSET(flags, DISPLAY_DOT_0)) {
-		SETBIT(parts[2], 7);
-	}
-	if (BITSET(flags, DISPLAY_DOT_1)) {
-		SETBIT(parts[2], 2);
-	}
-	if (BITSET(flags, DISPLAY_DOT_2)) {
-		SETBIT(parts[1], 5);
-	}
-	if (BITSET(flags, DISPLAY_DOT_3)) {
-		SETBIT(parts[1], 0);
+		}
 	}
 }
+
+inline void zeroOut() {
+	digits[0] = 0;
+	digits[1] = 0;
+	digits[2] = 0;
+	digits[3] = 0;
+}
+
+// loop repeating code
+inline void general_loop() {
+	static uint16_t adc_timeout = ADC_STARTUP;
+	static uint8_t led_state = 0;
+
+
+	// execute every ms
+	if (ms_count >= 76) {
+		ms_count = 0;
+		
+		// speaker
+		if (speaker_timeout > 0) {
+			speaker_timeout--;
+			TOGGLEBIT(PORTD, PD1);
+		} else {
+			CLEARBIT(PORTD, PD1);
+		}
+		
+			// display_update
+		if (display_bit < 32) {
+			if (BITSET(segments, display_bit)) {
+				displayData.set();
+			} else {
+				displayData.clear();
+			}
+			displayClock.set();
+			displayClock.clear();
+			display_bit++;
+		} else if (display_bit == 32) {
+			displayLatch.set();
+			displayLatch.clear();
+			display_bit++;
+		}
+	}
+
+	// execute every 50ms
+	if (ms50_count >= 3810) {
+		ms50_count = 0;
+
+		// if anything in adc_flags
+		if (adc_flags > 0) {
+			// voltage cutoff
+			if (BITSET(adc_flags, VOLTAGE_CUTOFF)) {
+				shutdown();
+			}
+			
+			// blinking led
+			if (BITSET(adc_flags, VOLTAGE_WARNING)) {
+				led_state++;
+				if (led_state == 16) {
+					ledOut.set();
+				} else if (led_state == 18) {
+					ledOut.clear();
+					led_state = 0;
+				}
+			}
+		}
+		
+		// adc
+		if (adc_timeout > 0) {
+			adc_timeout--;
+		} else {
+			adc_timeout = ADC_TIMEOUT;
+			SETBIT(ADCSRA, ADSC);
+		}
+
+		if (display_update > 0 && display_bit == 33) {
+			segments = 0;
+			if (digits[0] == 0) {
+				if (BITSET(display_zeros, DISPLAY_ZERO_0)) {
+					segments |= digit0masks[0];
+				}
+			} else {
+				segments |= pgm_read_dword(&digit0masks[digits[0]]);
+			}
+			if (digits[1] == 0) {
+				if (BITSET(display_zeros, DISPLAY_ZERO_1)) {
+					segments |= digit1masks[0];
+				}
+			} else {
+				segments |= pgm_read_dword(&digit1masks[digits[1]]);
+			}
+			if (digits[2] == 0) {
+				if (BITSET(display_zeros, DISPLAY_ZERO_2)) {
+					segments |= digit2masks[0];
+				}
+			} else {
+				segments |= pgm_read_dword(&digit2masks[digits[2]]);
+			}
+			if (digits[3] == 0) {
+				if (BITSET(display_zeros, DISPLAY_ZERO_3)) {
+					segments |= digit3masks[0];
+				}
+			} else {
+				segments |= pgm_read_dword(&digit3masks[digits[3]]);
+			}
+
+			display_update = 0;
+			display_bit = 0;
+		}
+		
+		// button
+		if (BITSET(PINC, PC1)) {
+			button_state = 0;
+		} else {
+			// shutdown if pressed for 1s				
+			if (button_state >= 100) {
+				shutdown();
+			}
+						
+			// button pressed
+			button_state++;
+		}
+	}
+}
+
+// SHUTDOWN ROUTINE
+void shutdown() {
+	// disable interrupts
+	cli();
+
+	// going to shutdown, turn off display
+	avr_cpp_lib::shiftOut(&displayData, &displayClock, 0);
+	avr_cpp_lib::shiftOut(&displayData, &displayClock, 0);
+	avr_cpp_lib::shiftOut(&displayData, &displayClock, 0);
+	avr_cpp_lib::shiftOut(&displayData, &displayClock, 0);
+	displayLatch.set();
+	displayLatch.clear();
+	ledOut.clear();
+	
+	// wait for button release
+	while (BITCLEAR(PINC, PC1));
+	CLEARBIT(PORTC, PC0);
+
+	// infinite loop
+	for (;;);
+}
+
+// CHOOSE ROUTINE
+uint8_t choose(uint8_t max) {
+	display_dots = 0;
+	display_zeros = 0;
+	zeroOut();
+
+	uint8_t max0 = 0;
+	uint8_t max1 = 0;
+	uint8_t max2 = 0;
+	if (max < 10) {
+		max0 = max + 1;
+	} else {
+		max0 = 10;
+		if (max < 100) {
+			max1 = (max/10) + 1;
+		} else {
+			max1 = 10;
+			max2 = (max/100)+1;
+		}
+	}
+
+	displayUpdate();
+
+	general_count = 0;
+
+	for (;;) {
+		general_loop();
+
+		// sweep through modes (approx. 1.16x per second)
+		if (general_count >= 65535) {
+			general_count = 0;
+			
+			increaseWithMax(max0, max1, max2, 0);
+			displayUpdate();
+		}
+		
+		if (button_state == 1) {
+			break;
+		}
+	}
+
+	return digits[0] + 10*digits[1] + 100*digits[2];
+}
+
+
 
 int main() {
 	// INIT
@@ -229,12 +364,7 @@ int main() {
 	SETBIT(PORTC, PC0);
 	SETBIT(PORTC, PC1);
 	while (BITCLEAR(PINC, PC1));
-	
-	// timer 1 for 1 ms interrupts
-	TCCR1A = 0;
-	TCCR1B = 0b00001010; // divider 8, CTC mode 
-	OCR1A = 1000; // top is 1000
-	TIMSK1 = 0b00000010; // ocie1a interrupt
+	_delay_ms(5);
 	
 	// pwm for leds
 	//SETBIT(DDRD, PD5);
@@ -243,51 +373,65 @@ int main() {
 	TCCR0B = 0b00000001;
 	OCR0A = 105;
 	OCR0B = 105;
-	TIMSK0 = 0b00000010; // interrupt for ir count
+	TIMSK0 = 0b00000010; // interrupt for ir and ms count
 
 	// speaker
 	SETBIT(DDRD, PD1);
-	//TCCR2A = 0b00000010;
-	//TCCR2B = 0b00000111; // 1024 prescaler
-	//OCR2A = 1; // for around 440hz
-	//TIMSK2 = 0b00000010;
 
 	// adc measurement
 	ADMUX = 0b11000111;
 	ADCSRA = 0b10001111;
 
-	// display output pins
-	avr_cpp_lib::OutputPin displayData(&DDRD, &PORTD, PD2);
-	avr_cpp_lib::OutputPin displayClock(&DDRD, &PORTD, PD3);
-	avr_cpp_lib::OutputPin displayLatch(&DDRD, &PORTD, PD4);	
-
-	// led output pin
-	avr_cpp_lib::OutputPin ledOut(&DDRC, &PORTC, PC2);
+	ledOut.set();
 
 	// enable interrupts
 	sei();
 
-	uint16_t button_state = 0;
-	uint8_t pwm_state = 0;
-	uint8_t pwm_bit = 0;
-	uint16_t adc_state = 0;
-	uint16_t led_state = 0;
-	uint8_t ir_state = 0;
-	uint8_t speaker_state = 0;
-	
-	uint8_t mode_state = 0;
-	uint8_t disp0 = 0;
-	uint8_t disp1 = 0;
+	// ir stuff
 	uint16_t delay_state = 0;
+	uint8_t ir_state = 0;
+	uint8_t ir_flags = 0;
+#define IR_CONNECTED 0
+#define IR_ACTED 1
 
-	SETBIT(flags, IR_WAS_CONNECTED);
+#define INIT_IR() ir_flags = BIT(IR_ACTED); \
+	ir_state = 0; \
+	delay_state = 0
 
+	INIT_IR();
+
+	
+	// mode stuff
+	uint8_t flags = 0;
+	uint8_t second_timeout = 0;
+#define MODE_ACTIVE 0
+#define COUNT_ORDER 1
+	uint8_t mode = choose(NUM_MODES);
+	switch (mode) {
+	case 0:
+		display_zeros = BIT(DISPLAY_ZERO_0) | BIT(DISPLAY_ZERO_1) | BIT(DISPLAY_ZERO_2);
+		display_dots = BIT(DISPLAY_DOT_2);
+		break;
+	case 1:
+		display_zeros = BIT(DISPLAY_ZERO_0);
+		display_dots = 0;
+		break;
+	case 2:
+		display_zeros = 0;
+		display_dots = BIT(DISPLAY_DOT_0);
+		break;
+	}
+	zeroOut();
+	displayUpdate();
+
+	// main loop with ir sensing
 	for (;;) {
+		general_loop();
 
 		// ir state machine
 		switch (ir_state) {
 			case 0: // not connected, wait
-				CLEARBIT(flags, IR_CONNECTED);
+				CLEARBIT(ir_flags, IR_CONNECTED);
 				if (BITCLEAR(PIND, PD7)) {
 					ir_state = 1;
 				}
@@ -371,9 +515,8 @@ int main() {
 			case 13: // check for signal 0 and timeout
 				if (BITCLEAR(PIND, PD7)) {
 					ir_state = 1;
-					SETBIT(flags, IR_CONNECTED);
-								ledOut.set();
-
+					SETBIT(ir_flags, IR_CONNECTED);
+					CLEARBIT(ir_flags, IR_ACTED);
 				}
 				if (ir_count >= 85) {
 					ir_state = 0;
@@ -381,209 +524,82 @@ int main() {
 				break;
 		}
 
-			
-		// pwm of leds
-		if (pwm_state < 4) {
-			if (pwm_bit == 32) {
-				pwm_state++;
-				pwm_bit = 0;
-				displayData.clear();
-				displayLatch.set();
-				displayLatch.clear();
-				ledOut.clear();
-			}
-			
-			if (pwm_state == 0) {
-				if (BITSET(parts[pwm_bit/8], pwm_bit%8)) {
-					displayData.set();
+		if (ir_flags == 0) {
+			ir_flags = BIT(IR_ACTED);
+
+			speaker_timeout = 150;
+
+			switch (mode) {
+			case 0:
+				delay_state = 200;
+				if (BITCLEAR(flags, MODE_ACTIVE)) {
+					SETBIT(flags, MODE_ACTIVE);
+					general_count = 0;
+					zeroOut();
+					displayUpdate();
 				} else {
-					displayData.clear();
+					CLEARBIT(flags, MODE_ACTIVE);
+					CLEARBIT(flags, COUNT_ORDER);
 				}
-				displayClock.set();
-				displayClock.clear();
-			} else if (pwm_state == 1) {
-				displayClock.set();
-				displayClock.clear();
-			}
-			pwm_bit++;
-		} else {
-			if (BITSET(flags, VOLTAGE_WARNING)) {
-				if (led_state > 700) {
-					ledOut.set();
-					if (led_state > 800) {
-						led_state = 0;
-					}
-				}
-			} else {
-				ledOut.set();
-			}
-			pwm_bit = 0;
-			pwm_state = 0;
-		}
-		
-		if (BITSET(flags, MS_FLAG)) {
-			CLEARBIT(flags, MS_FLAG);
-			
-			if (BITCLEAR(flags, IR_CONNECTED)) {
-				if (BITCLEAR(flags, IR_WAS_CONNECTED) && delay_state == 0) {
-					SETBIT(flags, IR_WAS_CONNECTED);
-					
-					speaker_state = 150;
-					delay_state = 2000;
-					
-					// actions
-					if (BITSET(flags, MODE_SELECTED)) {
-						if (mode_state == 1) {
-							if (BITCLEAR(flags, MODE_ACTIVE)) {
-								SETBIT(flags, MODE_ACTIVE);
-								disp0 = 0;
-								disp1 = 0;
-								CLEARBIT(flags, COUNT_ORDER);
-							} else {
-								CLEARBIT(flags, MODE_ACTIVE);
-							}
-						} else if (mode_state == 2) {
-							disp1++;
-							displayWrite(disp0, disp1, 0b10000000);
-						}
-					}
-				}
-			} else {
-				CLEARBIT(flags, IR_WAS_CONNECTED);
-			}
-			
-			// timing
-			if (BITSET(flags, MODE_ACTIVE)) {
-				if (BITCLEAR(flags, COUNT_ORDER)) {
-					if (adc_state % 10 == 1) {
-						disp1++;
-						if (disp1 == 100) {
-							disp0++;
-							disp1 = 0;
-							if (disp0 == 60) {
-								disp0 = 1;
-								SETBIT(flags, COUNT_ORDER);
-							}
-						}
-						displayWrite(disp0, disp1, 0b11100010);
-					}
-				} else {
-					if (adc_state % 1000 == 1) {
-						disp1++;
-						if (disp1 == 60) {
-							disp0++;
-							disp1 = 0;
-						}
-					}
-					displayWrite(disp0, disp1, 0b11100010);
-				}
-			}
-			if (delay_state > 0) {
-				delay_state --;
-			}
-			
-			// speaker
-			if (speaker_state > 0) {
-				speaker_state--;
-				TOGGLEBIT(PORTD, PD1);
-			} else {
-				CLEARBIT(PORTD, PD1);
-			}
-			
-			// led blinking
-			led_state++;
-			
-			// adc
-			if (adc_state == 2000) {
-				adc_state = 0;
-				SETBIT(ADCSRA, ADSC);
-			} else {
-				adc_state++;
-			}
-			
-			// mode change
-			if (BITCLEAR(flags, MODE_SELECTED)) {
-				if (adc_state % 1000 == 1) {
-					mode_state++;
-					if (mode_state > NUM_MODES) {
-						mode_state = 1;
-					}
-					displayWrite(0, mode_state, 0);
-				}
-			}
-			
-			// voltage cutoff
-			if (BITSET(flags, VOLTAGE_CUTOFF)) {
+				break;
+			case 1:
+				delay_state = 500;
+				increaseWithMax();
+				displayUpdate();
+				break;
+			case 2:
 				break;
 			}
-			
-			// button
-			if (BITSET(PINC, PC1)) {
-				button_state = 0;
-			} else {
-				// shutdown if pressed for 1s				
-				if (button_state >= 1000) {
-					break;
-				}
-				
-				if (BITCLEAR(flags, MODE_SELECTED)) {
-					SETBIT(flags, MODE_SELECTED);
-					if (mode_state == 1) {
-						displayWrite(0,0,0b11100010);
-					} else if (mode_state == 2) {
-						displayWrite(0,0,0b10000000);
-					} else if (mode_state == 3) {
-						displayWrite(0,0,0b00001000);
+		}
+
+		// execute every 10ms
+		if (general_count >= 762) {
+			// this just about makes it a bit more accurate for timing
+			general_count -= 762;
+
+			// delay another action upon detection
+			if (delay_state > 0) {
+				delay_state--;
+			}
+
+			// mode 0 counter
+			if (BITSET(flags, MODE_ACTIVE)) {
+				if (BITCLEAR(flags, COUNT_ORDER)) {
+					increaseWithMax();
+					if (digits[3] == 6) {
+						digits[3] = 0;
+						digits[2] = 1;
+						SETBIT(flags, COUNT_ORDER);
+						second_timeout = 100;
 					}
+					displayUpdate();
+				} else {
+					if (second_timeout == 0) {
+						second_timeout = 100;
+						increaseWithMax(10, 6);
+						displayUpdate();
+					}
+					second_timeout--;
 				}
 
-				// button pressed
-				button_state++;
 			}
 		}
 	}
-	
-	// going to shutdown, turn off display
-	avr_cpp_lib::shiftOut(&displayData, &displayClock, 0);
-	avr_cpp_lib::shiftOut(&displayData, &displayClock, 0);
-	avr_cpp_lib::shiftOut(&displayData, &displayClock, 0);
-	avr_cpp_lib::shiftOut(&displayData, &displayClock, 0);
-	displayLatch.set();
-	displayLatch.clear();
-	ledOut.clear();
-	
-	// wait for button release
-	while (BITCLEAR(PINC, PC1));
-	CLEARBIT(PORTC, PC0);
-}
-
-ISR(TIMER1_COMPA_vect) {
-	SETBIT(flags, MS_FLAG);
 }
 
 ISR(TIMER0_COMPA_vect) {
 	ir_count++;
+	ms_count++;
+	general_count++;
+	ms50_count++;
 }
 
 ISR(ADC_vect) {
-	static uint8_t count = 0;
-	static uint16_t accumulator = 0;
-
-	accumulator += ADC;
-	count++;
-	if (count > 59) {
-		accumulator /= 60;
-		
-		if (accumulator < 900) {
-			SETBIT(flags, VOLTAGE_WARNING);
-			if (accumulator < 850) {
-				SETBIT(flags, VOLTAGE_CUTOFF);
-			}
+	uint16_t tmp = ADC;
+	if (tmp < (uint16_t)(900u*ADC_CALIBRATION)) {
+		SETBIT(adc_flags, VOLTAGE_WARNING);
+		if (tmp < (uint16_t)(850u*ADC_CALIBRATION)) {
+			SETBIT(adc_flags, VOLTAGE_CUTOFF);
 		}
-		
-		count = 0;
-		accumulator = 0;
-	} else {
-		SETBIT(ADCSRA, ADSC);
 	}
 }
