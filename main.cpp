@@ -30,7 +30,7 @@
 // times are multiplied by 50ms
 #define ADC_TIMEOUT 200
 #define ADC_STARTUP 10
-#define ADC_CALIBRATION 1
+#define ADC_CALIBRATION 1.005
 
 #include <avr/io.h>
 #include <avr/interrupt.h>
@@ -92,7 +92,7 @@ const uint32_t digit1masks[] PROGMEM = {
 	0b0000100000000100, // 1
 	0b1001100000000011, // 2
 	0b1001100000000110, // 3
-	0b1001100000000100, // 4
+	0b1100100000000100, // 4
 	0b1101000000000110, // 5
 	0b1101000000000111, // 6
 	0b0001100000000100, // 7
@@ -240,7 +240,7 @@ inline void general_loop() {
 		}
 
 		if (display_update > 0 && display_bit == 33) {
-			segments = 0;
+			segments = display_dots;
 			if (digits[0] == 0) {
 				if (BITSET(display_zeros, DISPLAY_ZERO_0)) {
 					segments |= digit0masks[0];
@@ -279,7 +279,7 @@ inline void general_loop() {
 			button_state = 0;
 		} else {
 			// shutdown if pressed for 1s				
-			if (button_state >= 100) {
+			if (button_state >= 20) {
 				shutdown();
 			}
 						
@@ -314,7 +314,7 @@ void shutdown() {
 // CHOOSE ROUTINE
 uint8_t choose(uint8_t max) {
 	display_dots = 0;
-	display_zeros = 0;
+	display_zeros = BIT(DISPLAY_ZERO_0);
 	zeroOut();
 
 	uint8_t max0 = 0;
@@ -388,7 +388,7 @@ int main() {
 	sei();
 
 	// ir stuff
-	uint16_t delay_state = 0;
+	uint16_t delay_timeout = 0;
 	uint8_t ir_state = 0;
 	uint8_t ir_flags = 0;
 #define IR_CONNECTED 0
@@ -396,7 +396,7 @@ int main() {
 
 #define INIT_IR() ir_flags = BIT(IR_ACTED); \
 	ir_state = 0; \
-	delay_state = 0
+	delay_timeout = 0
 
 	INIT_IR();
 
@@ -406,7 +406,7 @@ int main() {
 	uint8_t second_timeout = 0;
 #define MODE_ACTIVE 0
 #define COUNT_ORDER 1
-	uint8_t mode = choose(NUM_MODES);
+	uint8_t mode = choose(NUM_MODES - 1);
 	switch (mode) {
 	case 0:
 		display_zeros = BIT(DISPLAY_ZERO_0) | BIT(DISPLAY_ZERO_1) | BIT(DISPLAY_ZERO_2);
@@ -524,14 +524,14 @@ int main() {
 				break;
 		}
 
-		if (ir_flags == 0) {
+		if (ir_flags == 0 && delay_timeout == 0) {
 			ir_flags = BIT(IR_ACTED);
 
 			speaker_timeout = 150;
 
 			switch (mode) {
 			case 0:
-				delay_state = 200;
+				delay_timeout = 200;
 				if (BITCLEAR(flags, MODE_ACTIVE)) {
 					SETBIT(flags, MODE_ACTIVE);
 					general_count = 0;
@@ -543,7 +543,7 @@ int main() {
 				}
 				break;
 			case 1:
-				delay_state = 500;
+				delay_timeout = 500;
 				increaseWithMax();
 				displayUpdate();
 				break;
@@ -555,11 +555,11 @@ int main() {
 		// execute every 10ms
 		if (general_count >= 762) {
 			// this just about makes it a bit more accurate for timing
-			general_count -= 762;
+			general_count = 0;
 
 			// delay another action upon detection
-			if (delay_state > 0) {
-				delay_state--;
+			if (delay_timeout > 0) {
+				delay_timeout--;
 			}
 
 			// mode 0 counter
