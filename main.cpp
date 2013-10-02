@@ -45,6 +45,8 @@
 
 #define NUM_MODES 3
 
+#define IR_ERROR 13
+
 // global states and flags
 volatile uint8_t adc_flags = 0;
 #define VOLTAGE_WARNING 0
@@ -239,6 +241,8 @@ inline void general_loop() {
 			SETBIT(ADCSRA, ADSC);
 		}
 
+		// if display needs to be updated and is not in the middle of update
+		// recalculate segments and start update
 		if (display_update > 0 && display_bit == 33) {
 			segments = display_dots;
 			if (digits[0] == 0) {
@@ -386,20 +390,6 @@ int main() {
 
 	// enable interrupts
 	sei();
-
-	// ir stuff
-	uint16_t delay_timeout = 0;
-	uint8_t ir_state = 0;
-	uint8_t ir_flags = 0;
-#define IR_CONNECTED 0
-#define IR_ACTED 1
-
-#define INIT_IR() ir_flags = BIT(IR_ACTED); \
-	ir_state = 0; \
-	delay_timeout = 0
-
-	INIT_IR();
-
 	
 	// mode stuff
 	uint8_t flags = 0;
@@ -424,16 +414,24 @@ int main() {
 	zeroOut();
 	displayUpdate();
 
+	// ir stuff
+	uint16_t ir_delay = 0;
+	uint8_t ir_broken = 0;
+	uint8_t ir_state = 0;
+	ir_count = 0;
+
 	// main loop with ir sensing
 	for (;;) {
 		general_loop();
 
 		// ir state machine
 		switch (ir_state) {
-			case 0: // not connected, wait
-				CLEARBIT(ir_flags, IR_CONNECTED);
+			case 0: // check for signal 0 and timeout
 				if (BITCLEAR(PIND, PD7)) {
 					ir_state = 1;
+				}
+				if (ir_count >= 85) {
+					ir_state = IR_ERROR;
 				}
 				break;
 			case 1: // wait till end of signal 0
@@ -465,7 +463,7 @@ int main() {
 					ir_state = 6;
 				}
 				if (ir_count >= 130) {
-					ir_state = 0;
+					ir_state = IR_ERROR;
 				}
 				break;
 			case 6: // wait till end of signal 1
@@ -496,9 +494,10 @@ int main() {
 			case 10: // check for signal 2 and timeout
 				if (BITCLEAR(PINB, PB7)) {
 					ir_state = 11;
+					ir_broken = 0;
 				}
 				if (ir_count >= 130) {
-					ir_state = 0;
+					ir_state = IR_ERROR;
 				}
 				break;
 			case 11: // wait till end of signal 2
@@ -509,29 +508,25 @@ int main() {
 				break;
 			case 12: // wait till after possible beginning (just)
 				if (ir_count >= 18) {
-					ir_state = 13;
-				}
-				break;
-			case 13: // check for signal 0 and timeout
-				if (BITCLEAR(PIND, PD7)) {
-					ir_state = 1;
-					SETBIT(ir_flags, IR_CONNECTED);
-					CLEARBIT(ir_flags, IR_ACTED);
-				}
-				if (ir_count >= 85) {
 					ir_state = 0;
 				}
 				break;
+			case IR_ERROR:
+				if (ir_broken < 100) {
+					ir_broken++;
+				}
+				ir_count = 0;
+				ir_state = 0;
+				break;
 		}
 
-		if (ir_flags == 0 && delay_timeout == 0) {
-			ir_flags = BIT(IR_ACTED);
+		if (ir_broken >= 5 && ir_delay == 0) {
 
 			speaker_timeout = 150;
 
 			switch (mode) {
 			case 0:
-				delay_timeout = 200;
+				ir_delay = 200;
 				if (BITCLEAR(flags, MODE_ACTIVE)) {
 					SETBIT(flags, MODE_ACTIVE);
 					general_count = 0;
@@ -543,7 +538,7 @@ int main() {
 				}
 				break;
 			case 1:
-				delay_timeout = 500;
+				ir_delay = 500;
 				increaseWithMax();
 				displayUpdate();
 				break;
@@ -558,8 +553,8 @@ int main() {
 			general_count = 0;
 
 			// delay another action upon detection
-			if (delay_timeout > 0) {
-				delay_timeout--;
+			if (ir_delay > 0) {
+				ir_delay--;
 			}
 
 			// mode 0 counter
