@@ -520,7 +520,7 @@ int main() {
 				break;
 		}
 
-		if (ir_broken >= 5 && ir_delay == 0) {
+		if (ir_broken >= 3 && ir_delay == 0) {
 
 			speaker_timeout = 150;
 
