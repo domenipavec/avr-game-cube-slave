@@ -327,7 +327,8 @@ int main() {
 		}
 		
 		// ir broken
-		if (ir_broken >= 3 && ir_delay == 0) {
+		if (ir_broken == 3 && ir_delay == 0) {
+			ir_broken++;
 
 			speaker_timeout = 150;
 

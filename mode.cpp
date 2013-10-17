@@ -77,6 +77,7 @@ Mode * getMode(uint8_t i) {
 		m.ds = DisplaySettings(true, true, true, false, false, false, true);
 		m.irDelay = 200;
 		m.broken = timerBroken;
+		m.ms10 = timerms10;
 		break;
 	case 1: // counter mode
 		m.ds = DisplaySettings(true);

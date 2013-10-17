@@ -55,10 +55,10 @@ bool Display::increaseLS(uint8_t lls, uint8_t mls) {
 	needRefresh = true;
 
 	digits[0]++;
-	if (digits[0] > lls) {
+	if (digits[0] >= lls) {
 		digits[0] = 0;
 		digits[1]++;
-		if (digits[1] > mls) {
+		if (digits[1] >= mls) {
 			digits[1] = 0;
 			return true;
 		}
@@ -70,10 +70,10 @@ bool Display::increaseMS(uint8_t lms, uint8_t mms) {
 	needRefresh = true;
 
 	digits[2]++;
-	if (digits[2] > lms) {
+	if (digits[2] >= lms) {
 		digits[2] = 0;
 		digits[3]++;
-		if (digits[3] > mms) {
+		if (digits[3] >= mms) {
 			digits[3] = 0;
 			return true;
 		}
@@ -122,7 +122,6 @@ uint16_t Display::value() {
 
 void Display::update() {
 	if (bit < 33) {
-		bit++;
 		if (bit == 32) {
 			latch.set();
 			latch.clear();
@@ -135,6 +134,7 @@ void Display::update() {
 			clock.set();
 			clock.clear();
 		}
+		bit++;
 	}
 }
 
