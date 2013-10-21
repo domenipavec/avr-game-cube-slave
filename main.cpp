@@ -42,11 +42,22 @@
 #include "shiftOut.h"
 #include "io.h"
 
+using namespace avr_cpp_lib;
+
 #include "display.h"
-Display display(avr_cpp_lib::OutputPin(&DDRD, &PORTD, PD2), avr_cpp_lib::OutputPin(&DDRD, &PORTD, PD3), avr_cpp_lib::OutputPin(&DDRD, &PORTD, PD4));
+Display display(OutputPin(&DDRD, &PORTD, PD2), OutputPin(&DDRD, &PORTD, PD3), OutputPin(&DDRD, &PORTD, PD4));
 
 #include "mode.h"
 Mode * mode;
+
+uint8_t spi_transceive(const uint8_t send) {
+	SPDR = send;
+	while (BITCLEAR(SPSR, SPIF));
+	return SPDR;
+}
+
+#include "cc1101.h"
+CC1101 cc(&spi_transceive, OutputPin(&DDRB, &PORTB, PB0), InputPin(&DDRB, &PINB, PB4));
 
 #define IR_ERROR 13
 
@@ -59,7 +70,7 @@ uint8_t speaker_timeout = 0;
 static void shutdown();
 
 // led output pin
-avr_cpp_lib::OutputPin ledOut(&DDRC, &PORTC, PC2);
+OutputPin ledOut(&DDRC, &PORTC, PC2);
 
 // timer counts
 volatile uint8_t ir_count = 0;
@@ -214,6 +225,16 @@ int main() {
 
 	// enable interrupts
 	sei();
+
+	// init spi (ss pin must be output for some reason in master mode)
+	SETBIT(DDRB, PB2);
+	SETBIT(DDRB, PB3);
+	SETBIT(DDRB, PB5);
+	SPCR = 0b01010000;
+	SPSR = BIT(SPI2X);
+
+	// cc1101 config
+	cc.reset();
 	
 	// mode stuff
 	mode = getMode(choose(NUM_MODES - 1));
