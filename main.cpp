@@ -59,6 +59,47 @@ uint8_t spi_transceive(const uint8_t send) {
 #include "cc1101.h"
 CC1101 cc(&spi_transceive, OutputPin(&DDRB, &PORTB, PB0), InputPin(&DDRB, &PINB, PB4));
 
+static inline void ccinit() {
+	uint8_t config[3];
+
+	cc.reset();
+	
+	// calibrate!!!
+	cc.command(CC1101::SCAL);
+	_delay_ms(1);
+	
+	// GDO2 to high impedance
+	config[0] = 0x2E;
+	// GDO1 to high impedance
+	config[1] = 0x2E;
+	// GDO0(PB1) assert when CRC packet received
+	config[2] = 0x07;	
+	cc.writeBurst(CC1101::IOCFG2, config, 3);
+	
+	// PKTLEN to 1
+	config[0] = 1;
+	// PKTCTRL1 no append status, crc autoflush
+	config[1] = BIT(3);
+	// PKTCTRL0 white data, normal mode, crc fixed length
+	config[2] = BIT(6) | BIT(2);
+	cc.writeBurst(CC1101::PKTLEN, config, 3);
+	
+	// set frequency in FREQ[0-2]
+	static const uint8_t F_CRYSTAL = 27;
+	static const uint32_t F_CARRIER = 433;
+	static const uint32_t FREQ = (F_CARRIER << 16)/F_CRYSTAL;
+	config[0] = FREQ>>16;
+	config[1] = (FREQ>>8) & 0xff;
+	config[2] = FREQ & 0xff;
+	cc.writeBurst(CC1101::FREQ2, config, 3);
+	
+	// set manchester encoding, 2-fsk, 16/16 sync
+	cc.write(CC1101::MDMCFG2, BIT(3) | 0b010);
+	
+	// cca mode always, rx to tx, tx to rx
+	cc.write(CC1101::MCSM1, 0b00001011);
+}
+
 #define IR_ERROR 13
 
 volatile bool voltage_warning = false;
@@ -234,7 +275,7 @@ int main() {
 	SPSR = BIT(SPI2X);
 
 	// cc1101 config
-	cc.reset();
+	ccinit();
 	
 	// mode stuff
 	mode = getMode(choose(NUM_MODES - 1));
