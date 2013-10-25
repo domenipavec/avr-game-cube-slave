@@ -44,12 +44,6 @@
 
 using namespace avr_cpp_lib;
 
-#include "display.h"
-Display display(OutputPin(&DDRD, &PORTD, PD2), OutputPin(&DDRD, &PORTD, PD3), OutputPin(&DDRD, &PORTD, PD4));
-
-#include "mode.h"
-Mode * mode;
-
 uint8_t spi_transceive(const uint8_t send) {
 	SPDR = send;
 	while (BITCLEAR(SPSR, SPIF));
@@ -105,7 +99,6 @@ static inline void ccinit() {
 volatile bool voltage_warning = false;
 
 uint8_t button_state = 0;
-uint8_t speaker_timeout = 0;
 
 // function prototypes
 static void shutdown();
@@ -115,7 +108,6 @@ OutputPin ledOut(&DDRC, &PORTC, PC2);
 
 // timer counts
 volatile uint8_t ir_count = 0;
-volatile uint8_t ms_count = 0;
 volatile uint16_t general_count = 0;
 volatile uint16_t ms50_count = 0;
 
@@ -123,21 +115,6 @@ volatile uint16_t ms50_count = 0;
 static inline void general_loop() {
 	static uint16_t adc_timeout = ADC_STARTUP;
 	static uint8_t led_state = 0;
-
-	// execute every ms
-	if (ms_count >= 76) {
-		ms_count = 0;
-		
-		// speaker
-		if (speaker_timeout > 0) {
-			speaker_timeout--;
-			TOGGLEBIT(PORTD, PD1);
-		} else {
-			CLEARBIT(PORTD, PD1);
-		}
-		
-		display.update();
-	}
 
 	// execute every 50ms
 	if (ms50_count >= 3810) {
@@ -162,8 +139,6 @@ static inline void general_loop() {
 			SETBIT(ADCSRA, ADSC);
 		}
 
-		display.refresh();
-
 		// button
 		if (BITSET(PINC, PC1)) {
 			button_state = 0;
@@ -185,7 +160,6 @@ static void shutdown() {
 	cli();
 
 	// going to shutdown, turn off display
-	display.turnOff();
 	ledOut.clear();
 	
 	// wait for button release
@@ -194,47 +168,6 @@ static void shutdown() {
 
 	// infinite loop
 	for (;;);
-}
-
-DisplaySettings chooseDS(true);
-// CHOOSE ROUTINE
-static uint8_t choose(uint8_t max) {
-	display.settings(&chooseDS);
-	display.zero();
-
-	uint8_t max0 = 0;
-	uint8_t max1 = 0;
-	uint8_t max2 = 0;
-	if (max < 10) {
-		max0 = max + 1;
-	} else {
-		max0 = 10;
-		if (max < 100) {
-			max1 = (max/10) + 1;
-		} else {
-			max1 = 10;
-			max2 = (max/100)+1;
-		}
-	}
-
-	general_count = 0;
-
-	for (;;) {
-		general_loop();
-
-		// sweep through modes (approx. 1.16x per second)
-		if (general_count >= 65535) {
-			general_count = 0;
-			
-			display.increase(max0, max1, max2, 0);
-		}
-		
-		if (button_state == 1) {
-			break;
-		}
-	}
-
-	return display.value();
 }
 
 int main() {
@@ -255,9 +188,6 @@ int main() {
 	OCR0B = 105;
 	TIMSK0 = 0b00000010; // interrupt for ir and ms count
 
-	// speaker
-	SETBIT(DDRD, PD1);
-
 	// adc measurement
 	ADMUX = 0b11000111;
 	ADCSRA = 0b10001111;
@@ -277,11 +207,6 @@ int main() {
 	// cc1101 config
 	ccinit();
 	
-	// mode stuff
-	mode = getMode(choose(NUM_MODES - 1));
-	display.settings(&(mode->ds));
-	display.zero();
-
 	// ir stuff
 	uint16_t ir_delay = 0;
 	uint8_t ir_broken = 0;
@@ -392,17 +317,13 @@ int main() {
 		if (ir_broken == 3 && ir_delay == 0) {
 			ir_broken++;
 
-			speaker_timeout = 150;
-
-			ir_delay = mode->irDelay;
-
-			mode->broken();
+			ir_delay = 150;
 		}
 
 		// button pressed
 		if (button_state == 1) {
 			button_state ++;
-			mode->button();
+
 		}
 
 		// execute every 10ms
@@ -413,15 +334,12 @@ int main() {
 			if (ir_delay > 0) {
 				ir_delay--;
 			}
-
-			mode->ms10();
 		}
 	}
 }
 
 ISR(TIMER0_COMPA_vect) {
 	ir_count++;
-	ms_count++;
 	general_count++;
 	ms50_count++;
 }

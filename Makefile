@@ -89,7 +89,7 @@ FUSE_SETTINGS=-U lfuse:w:0xe2:m -U hfuse:w:0xd9:m -U efuse:w:0xff:m
 # (list all files to compile, e.g. 'a.c b.cpp as.S'):
 # Use .cc, .cpp or .C suffix for C++ files, use .S 
 # (NOT .s !!!) for assembly source code files.
-PRJSRC=./avr-cpp-lib/cc1101.cpp mode.cpp display.cpp main.cpp ./avr-cpp-lib/io.cpp ./avr-cpp-lib/shiftOut.cpp
+PRJSRC=./avr-cpp-lib/cc1101.cpp main.cpp ./avr-cpp-lib/io.cpp
 
 # additional includes (e.g. -I/path/to/mydir)
 INC=-I./avr-cpp-lib
