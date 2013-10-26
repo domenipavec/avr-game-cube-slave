@@ -51,23 +51,21 @@ uint8_t spi_transceive(const uint8_t send) {
 }
 
 #include "cc1101.h"
-CC1101 cc(&spi_transceive, OutputPin(&DDRB, &PORTB, PB0), InputPin(&DDRB, &PINB, PB4));
+InputPin gdo0(&DDRB, &PINB, PB1);
+InputPin gdo1(&DDRD, &PINB, PB4);
+CC1101 cc(&spi_transceive, OutputPin(&DDRB, &PORTB, PB0), gdo1);
 
 static inline void ccinit() {
 	uint8_t config[3];
 
 	cc.reset();
-	
-	// calibrate!!!
-	cc.command(CC1101::SCAL);
-	_delay_ms(1);
-	
+
 	// GDO2 to high impedance
 	config[0] = 0x2E;
-	// GDO1 to high impedance
-	config[1] = 0x2E;
-	// GDO0(PB1) assert when CRC packet received
-	config[2] = 0x07;	
+	// GDO1 assert when CRC packet received
+	config[1] = 0x07;
+	// GDO0(PB1) assert when sync word is sent, deasserts at the end of packet
+	config[2] = 0x06;
 	cc.writeBurst(CC1101::IOCFG2, config, 3);
 	
 	// PKTLEN to 1
@@ -90,8 +88,44 @@ static inline void ccinit() {
 	// set manchester encoding, 2-fsk, 16/16 sync
 	cc.write(CC1101::MDMCFG2, BIT(3) | 0b010);
 	
-	// cca mode always, rx to tx, tx to rx
-	cc.write(CC1101::MCSM1, 0b00001011);
+	// cca mode always, rx to rx, tx to rx
+	cc.write(CC1101::MCSM1, 0b00001111);
+
+	// calibrate after setting frequency
+	cc.command(CC1101::SCAL);
+	_delay_ms(1);	
+}
+
+#define CC_A (6)
+#define CC_B (5)
+#define CC_IDLE_STATE (4)
+#define CC_MAX_TRIES (100)
+#define CC_TIMEOUT (200);
+static uint8_t cc_packet = 0;
+static uint8_t cc_state = CC_IDLE_STATE;
+static uint8_t cc_tries = 0;
+static uint8_t cc_timeout = CC_TIMEOUT;
+static uint8_t cc_failures = 0;
+static uint8_t ir_broken_setting = 3;
+static uint8_t ir_delay_setting = 20;
+static inline void sendPacket(bool button, bool ir) {
+	static uint8_t i = 0;
+	if (cc_state == CC_IDLE_STATE) {
+		cc_state = 0;
+		cc_tries = CC_MAX_TRIES;
+		cc_timeout = CC_TIMEOUT;
+		cc_packet = i;
+		if (button) {
+			SETBIT(cc_packet, CC_A);
+		}
+		if (ir) {
+			SETBIT(cc_packet, CC_B);
+		}
+		i++;
+		if (i > 3) {
+			i = 0;
+		}
+	}
 }
 
 #define IR_ERROR 13
@@ -107,52 +141,9 @@ static void shutdown();
 OutputPin ledOut(&DDRC, &PORTC, PC2);
 
 // timer counts
-volatile uint8_t ir_count = 0;
-volatile uint16_t general_count = 0;
-volatile uint16_t ms50_count = 0;
-
-// loop repeating code
-static inline void general_loop() {
-	static uint16_t adc_timeout = ADC_STARTUP;
-	static uint8_t led_state = 0;
-
-	// execute every 50ms
-	if (ms50_count >= 3810) {
-		ms50_count = 0;
-
-		// blinking led
-		if (voltage_warning) {
-			led_state++;
-			if (led_state == 16) {
-				ledOut.set();
-			} else if (led_state == 18) {
-				ledOut.clear();
-				led_state = 0;
-			}
-		}
-		
-		// adc
-		if (adc_timeout > 0) {
-			adc_timeout--;
-		} else {
-			adc_timeout = ADC_TIMEOUT;
-			SETBIT(ADCSRA, ADSC);
-		}
-
-		// button
-		if (BITSET(PINC, PC1)) {
-			button_state = 0;
-		} else {
-			// shutdown if pressed for 1s
-			if (button_state >= 21) {
-				shutdown();
-			}
-						
-			// button pressed
-			button_state++;
-		}
-	}
-}
+static volatile uint8_t ir_count = 0;
+static volatile uint16_t ms50_count = 0;
+static volatile uint8_t cc_count = 0;
 
 // SHUTDOWN ROUTINE
 static void shutdown() {
@@ -206,16 +197,60 @@ int main() {
 
 	// cc1101 config
 	ccinit();
-	
+	cc.command(CC1101::SRX);
+
 	// ir stuff
 	uint16_t ir_delay = 0;
-	uint8_t ir_broken = 0;
+	uint8_t ir_broken = 100;
 	uint8_t ir_state = 0;
 	ir_count = 0;
+		
+	uint16_t adc_timeout = ADC_STARTUP;
+	uint8_t led_state = 0;
 
 	// main loop with ir sensing
 	for (;;) {
-		general_loop();
+		// transceiver state machine
+		switch (cc_state) {
+		case 0:
+			cc.write(CC1101::FIFO, cc_packet);
+			cc.command(CC1101::STX);
+			cc_state = 1;
+			break;
+		case 1:
+			if (gdo0.isSet()) {
+				cc_state = 2;
+			}
+			break;
+		case 2:
+			if (!gdo0.isSet()) {
+				cc_state = 3;
+				cc_count = 0;
+			}
+			break;
+		case 3:
+			if (gdo1.isSet()) {
+				uint8_t v = cc.read(CC1101::FIFO);
+				ir_broken_setting = (v & 0b011111) + 1;
+				ir_delay_setting = ((v>>5) + 1) * 20;
+				cc_state = CC_IDLE_STATE;
+				cc_failures = 0;
+			}
+			if (cc_count >= 119) {
+				cc_tries--;
+				if (cc_tries > 0) {
+					cc.command(CC1101::STX);
+					cc_state = 0;
+				} else {
+					cc_state = CC_IDLE_STATE;
+					cc_failures++;
+					if (cc_failures > 10) {
+						shutdown();
+					}
+				}
+			}
+			break;
+		}
 
 		// ir state machine
 		switch (ir_state) {
@@ -314,25 +349,67 @@ int main() {
 		}
 		
 		// ir broken
-		if (ir_broken == 3 && ir_delay == 0) {
+		if (ir_broken == ir_broken_setting && ir_delay == 0) {
 			ir_broken++;
 
-			ir_delay = 150;
+			sendPacket(false, true);
+
+			ir_delay = ir_delay_setting;
 		}
 
-		// button pressed
-		if (button_state == 1) {
-			button_state ++;
-
-		}
-
-		// execute every 10ms
-		if (general_count >= 762) {
-			general_count = 0;
-
+		// execute every 50ms
+		if (ms50_count >= 3810) {
+			ms50_count = 0;
+			
 			// delay another action upon detection
 			if (ir_delay > 0) {
 				ir_delay--;
+			}
+
+			// blinking led
+			if (voltage_warning) {
+				led_state++;
+				if (led_state == 16) {
+					ledOut.set();
+				} else if (led_state == 18) {
+					ledOut.clear();
+					led_state = 0;
+				}
+			}
+			
+			// adc
+			if (adc_timeout > 0) {
+				adc_timeout--;
+			} else {
+				adc_timeout = ADC_TIMEOUT;
+				SETBIT(ADCSRA, ADSC);
+			}
+
+			// cc timeout (10s)
+			if (cc_timeout > 0) {
+				cc_timeout--;
+			} else {
+				sendPacket(false, false);
+			}
+			
+			// button
+			if (BITSET(PINC, PC1)) {
+				button_state = 0;
+			} else {
+				// button pressed
+				if (button_state == 1) {
+					button_state ++;
+					
+					sendPacket(true, false);
+				}
+
+				// shutdown if pressed for 1s
+				if (button_state >= 21) {
+					shutdown();
+				}
+						
+				// button pressed
+				button_state++;
 			}
 		}
 	}
@@ -340,8 +417,8 @@ int main() {
 
 ISR(TIMER0_COMPA_vect) {
 	ir_count++;
-	general_count++;
 	ms50_count++;
+	cc_count++;
 }
 
 ISR(ADC_vect) {
