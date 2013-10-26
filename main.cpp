@@ -30,7 +30,7 @@
 // times are multiplied by 50ms
 #define ADC_TIMEOUT 200
 #define ADC_STARTUP 10
-#define ADC_CALIBRATION 1.005
+#define ADC_CALIBRATION 1.009
 
 #include <avr/io.h>
 #include <avr/interrupt.h>
